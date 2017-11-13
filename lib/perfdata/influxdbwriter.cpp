@@ -344,6 +344,7 @@ void InfluxdbWriter::SendMetric(const Dictionary::Ptr& tmpl, const String& label
 		for (const Dictionary::Pair& pair : tags) {
 			// Empty macro expansion, no tag
 			if (!pair.second.IsEmpty()) {
+				// XXX: Check if the second EscapeKey() here is correct.
 				msgbuf << "," << EscapeKey(pair.first) << "=" << EscapeKey(pair.second);
 			}
 		}
