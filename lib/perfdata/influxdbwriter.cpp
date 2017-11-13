@@ -49,6 +49,24 @@
 
 using namespace icinga;
 
+class InfluxdbInteger : public Object
+{
+public:
+	DECLARE_PTR_TYPEDEFS(InfluxdbInteger);
+
+	InfluxdbInteger(int value)
+	    : m_Value(value)
+	{ }
+
+	int GetValue(void) const
+	{
+		return m_Value;
+	}
+
+private:
+	int m_Value;
+};
+
 REGISTER_TYPE(InfluxdbWriter);
 
 REGISTER_STATSFUNCTION(InfluxdbWriter, &InfluxdbWriter::StatsFunc);
@@ -218,21 +236,6 @@ void InfluxdbWriter::CheckResultHandlerWQ(const Checkable::Ptr& checkable, const
 		}
 	}
 
-	SendPerfdata(tmpl, checkable, cr, ts);
-}
-
-String InfluxdbWriter::FormatInteger(int val)
-{
-	return Convert::ToString(val) + "i";
-}
-
-String InfluxdbWriter::FormatBoolean(bool val)
-{
-	return val ? "true" : "false";
-}
-
-void InfluxdbWriter::SendPerfdata(const Dictionary::Ptr& tmpl, const Checkable::Ptr& checkable, const CheckResult::Ptr& cr, double ts)
-{
 	Array::Ptr perfdata = cr->GetPerformanceData();
 	if (perfdata) {
 		ObjectLock olock(perfdata);
@@ -277,16 +280,16 @@ void InfluxdbWriter::SendPerfdata(const Dictionary::Ptr& tmpl, const Checkable::
 		Dictionary::Ptr fields = new Dictionary();
 
 		if (service)
-			fields->Set("state", FormatInteger(service->GetState()));
+			fields->Set("state", new InfluxdbInteger(service->GetState()));
 		else
-			fields->Set("state", FormatInteger(host->GetState()));
+			fields->Set("state", new InfluxdbInteger(host->GetState()));
 
-		fields->Set("current_attempt", FormatInteger(checkable->GetCheckAttempt()));
-		fields->Set("max_check_attempts", FormatInteger(checkable->GetMaxCheckAttempts()));
-		fields->Set("state_type", FormatInteger(checkable->GetStateType()));
-		fields->Set("reachable", FormatBoolean(checkable->IsReachable()));
-		fields->Set("downtime_depth", FormatInteger(checkable->GetDowntimeDepth()));
-		fields->Set("acknowledgement", FormatInteger(checkable->GetAcknowledgement()));
+		fields->Set("current_attempt", new InfluxdbInteger(checkable->GetCheckAttempt()));
+		fields->Set("max_check_attempts", new InfluxdbInteger(checkable->GetMaxCheckAttempts()));
+		fields->Set("state_type", new InfluxdbInteger(checkable->GetStateType()));
+		fields->Set("reachable", checkable->IsReachable());
+		fields->Set("downtime_depth", new InfluxdbInteger(checkable->GetDowntimeDepth()));
+		fields->Set("acknowledgement", new InfluxdbInteger(checkable->GetAcknowledgement()));
 		fields->Set("latency", cr->CalculateLatency());
 		fields->Set("execution_time", cr->CalculateExecutionTime());
 
@@ -315,38 +318,19 @@ String InfluxdbWriter::EscapeKey(const String& str)
 	return result;
 }
 
-String InfluxdbWriter::EscapeField(const String& str)
+String InfluxdbWriter::EscapeValue(const Value& value)
 {
-	//TODO: Evaluate whether boost::regex is really needed here.
-
-	// Handle integers
-	boost::regex integer("-?\\d+i");
-	if (boost::regex_match(str.GetData(), integer)) {
-		return str;
+	if (value.IsObjectType<InfluxdbInteger>()) {
+		std::ostringstream os;
+		os << static_cast<InfluxdbInteger::Ptr>(value)->GetValue()
+		   << "i";
+		return os.str();
 	}
 
-	// Handle numerics
-	boost::regex numeric("-?\\d+(\\.\\d+)?((e|E)[+-]?\\d+)?");
-	if (boost::regex_match(str.GetData(), numeric)) {
-		return str;
-	}
+	if (value.IsBoolean())
+		return value ? "true" : "false";
 
-	// Handle booleans
-	boost::regex boolean_true("t|true", boost::regex::icase);
-	if (boost::regex_match(str.GetData(), boolean_true))
-		return "true";
-	boost::regex boolean_false("f|false", boost::regex::icase);
-	if (boost::regex_match(str.GetData(), boolean_false))
-		return "false";
-
-	// Handle NaNs
-	if (boost::math::isnan(str))
-		return 0;
-
-	// Otherwise it's a string and needs escaping and quoting
-	String result = str;
-	boost::algorithm::replace_all(result, "\"", "\\\"");
-	return "\"" + result + "\"";
+	return value;
 }
 
 void InfluxdbWriter::SendMetric(const Dictionary::Ptr& tmpl, const String& label, const Dictionary::Ptr& fields, double ts)
@@ -381,7 +365,7 @@ void InfluxdbWriter::SendMetric(const Dictionary::Ptr& tmpl, const String& label
 			else
 				msgbuf << ",";
 
-			msgbuf << EscapeKey(pair.first) << "=" << EscapeField(pair.second);
+			msgbuf << EscapeKey(pair.first) << "=" << EscapeValue(pair.second);
 		}
 	}
 
