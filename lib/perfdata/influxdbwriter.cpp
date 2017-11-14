@@ -229,10 +229,13 @@ void InfluxdbWriter::CheckResultHandlerWQ(const Checkable::Ptr& checkable, const
 	if (tags) {
 		ObjectLock olock(tags);
 		for (const Dictionary::Pair& pair : tags) {
-			// Prevent missing macros from warning; will return an empty value
-			// which will be filtered out in SendMetric()
 			String missing_macro;
-			tags->Set(pair.first, MacroProcessor::ResolveMacros(pair.second, resolvers, cr, &missing_macro));
+			Value value = MacroProcessor::ResolveMacros(pair.second, resolvers, cr, &missing_macro);
+
+			if (!missing_macro.IsEmpty())
+				continue;
+
+			tags->Set(pair.first, value);
 		}
 	}
 
@@ -297,7 +300,7 @@ void InfluxdbWriter::CheckResultHandlerWQ(const Checkable::Ptr& checkable, const
 	}
 }
 
-String InfluxdbWriter::EscapeKey(const String& str)
+String InfluxdbWriter::EscapeKeyOrTagValue(const String& str)
 {
 	// Iterate over the key name and escape commas and spaces with a backslash
 	String result = str;
@@ -305,16 +308,6 @@ String InfluxdbWriter::EscapeKey(const String& str)
 	boost::algorithm::replace_all(result, "=", "\\=");
 	boost::algorithm::replace_all(result, ",", "\\,");
 	boost::algorithm::replace_all(result, " ", "\\ ");
-
-	// InfluxDB 'feature': although backslashes are allowed in keys they also act
-	// as escape sequences when followed by ',' or ' '.  When your tag is like
-	// 'metric=C:\' bad things happen.  Backslashes themselves cannot be escaped
-	// and through experimentation they also escape '='.  To be safe we replace
-	// trailing backslashes with and underscore.
-	size_t length = result.GetLength();
-	if (result[length - 1] == '\\')
-		result[length - 1] = '_';
-
 	return result;
 }
 
@@ -336,7 +329,7 @@ String InfluxdbWriter::EscapeValue(const Value& value)
 void InfluxdbWriter::SendMetric(const Dictionary::Ptr& tmpl, const String& label, const Dictionary::Ptr& fields, double ts)
 {
 	std::ostringstream msgbuf;
-	msgbuf << EscapeKey(tmpl->Get("measurement"));
+	msgbuf << EscapeKeyOrTagValue(tmpl->Get("measurement"));
 
 	Dictionary::Ptr tags = tmpl->Get("tags");
 	if (tags) {
@@ -344,15 +337,14 @@ void InfluxdbWriter::SendMetric(const Dictionary::Ptr& tmpl, const String& label
 		for (const Dictionary::Pair& pair : tags) {
 			// Empty macro expansion, no tag
 			if (!pair.second.IsEmpty()) {
-				// XXX: Check if the second EscapeKey() here is correct.
-				msgbuf << "," << EscapeKey(pair.first) << "=" << EscapeKey(pair.second);
+				msgbuf << "," << EscapeKeyOrTagValue(pair.first) << "=" << EscapeKeyOrTagValue(pair.second);
 			}
 		}
 	}
 
-	// Label is may be empty in the case of metadata
+	// Label may be empty in the case of metadata
 	if (!label.IsEmpty())
-		msgbuf << ",metric=" << EscapeKey(label);
+		msgbuf << ",metric=" << EscapeKeyOrTagValue(label);
 
 	msgbuf << " ";
 
@@ -366,7 +358,7 @@ void InfluxdbWriter::SendMetric(const Dictionary::Ptr& tmpl, const String& label
 			else
 				msgbuf << ",";
 
-			msgbuf << EscapeKey(pair.first) << "=" << EscapeValue(pair.second);
+			msgbuf << EscapeKeyOrTagValue(pair.first) << "=" << EscapeValue(pair.second);
 		}
 	}
 
@@ -418,8 +410,6 @@ void InfluxdbWriter::FlushTimeoutWQ(void)
 
 void InfluxdbWriter::Flush(void)
 {
-	// Ensure you hold a lock against m_DataBuffer so that things
-	// don't go missing after creating the body and clearing the buffer
 	String body = boost::algorithm::join(m_DataBuffer, "\n");
 	m_DataBuffer.clear();
 
@@ -457,25 +447,27 @@ void InfluxdbWriter::Flush(void)
 		throw ex;
 	}
 
-	//TODO: Evaluate whether waiting for the result makes sense here. KeepAlive and close are options.
 	HttpResponse resp(stream, req);
 	StreamReadContext context;
 
 	try {
-		resp.Parse(context, true);
+		while (resp.Parse(context, true) && !resp.Complete)
+			; /* Do nothing */
 	} catch (const std::exception& ex) {
 		Log(LogWarning, "InfluxdbWriter")
-		    << "Cannot read from TCP socket from host '" << GetHost() << "' port '" << GetPort() << "'.";
+		    << "Failed to parse HTTP response from host '" << GetHost() << "' port '" << GetPort() << "': " << DiagnosticInformation(ex);
 		throw ex;
+	}
+
+	if (!resp.Complete) {
+		Log(LogWarning, "InfluxdbWriter")
+		    << "Failed to read a complete HTTP response from the InfluxDB server.";
+		return;
 	}
 
 	if (resp.StatusCode != 204) {
 		Log(LogWarning, "InfluxdbWriter")
-		    << "Unexpected response code " << resp.StatusCode;
-
-		// Finish parsing the headers and body
-		while (!resp.Complete)
-			resp.Parse(context, true);
+		    << "Unexpected response code: " << resp.StatusCode;
 
 		String contentType = resp.Headers->Get("content-type");
 		if (contentType != "application/json") {
@@ -502,6 +494,8 @@ void InfluxdbWriter::Flush(void)
 
 		Log(LogCritical, "InfluxdbWriter")
 		    << "InfluxDB error message:\n" << error;
+
+		return;
 	}
 }
 

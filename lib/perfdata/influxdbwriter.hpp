@@ -67,7 +67,7 @@ private:
 	void FlushTimeoutWQ(void);
 	void Flush(void);
 
-	static String EscapeKey(const String& str);
+	static String EscapeKeyOrTagValue(const String& str);
 	static String EscapeValue(const Value& value);
 
 	Stream::Ptr Connect();
